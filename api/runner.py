@@ -35,6 +35,23 @@ def _build_pipeline() -> Any:
     elif settings.quantization == "fp8-scaled-mm":
         quantization = QuantizationPolicy.fp8_scaled_mm()
 
+    valid_modes = {m.name for m in OffloadMode}
+    if settings.offload_mode not in valid_modes:
+        msg = f"LTX2_OFFLOAD_MODE={settings.offload_mode!r} invalid. Must be one of {sorted(valid_modes)}."
+        raise ValueError(msg)
+
+    offload_mode = OffloadMode[settings.offload_mode]
+
+    if settings.pipeline_name == "DistilledPipeline":
+        return pipeline_cls(
+            distilled_checkpoint_path=settings.checkpoint_path,
+            gemma_root=settings.gemma_root,
+            spatial_upsampler_path=settings.spatial_upsampler_path,
+            loras=[],
+            quantization=quantization,
+            offload_mode=offload_mode,
+        )
+
     distilled_lora = [LoraPathStrengthAndSDOps(path=settings.distilled_lora_path, strength=1.0, sd_ops=())]
 
     return pipeline_cls(
@@ -44,7 +61,7 @@ def _build_pipeline() -> Any:
         gemma_root=settings.gemma_root,
         loras=(),
         quantization=quantization,
-        offload_mode=OffloadMode[settings.offload_mode],
+        offload_mode=offload_mode,
     )
 
 
@@ -86,24 +103,44 @@ def run_generation(req: GenerateRequest, output_path: Path) -> None:
     images = [
         ImageConditioningInput(path=img.path, frame_idx=img.frame_idx, strength=img.strength, crf=img.crf)
         for img in req.images
+        if img.path and Path(img.path).is_file()
     ]
+    if req.images and not images:
+        msg = (
+            f"images provided but none of the paths exist on disk: "
+            f"{[i.path for i in req.images]}. Use absolute paths inside the pod."
+        )
+        raise FileNotFoundError(msg)
 
-    video, audio = pipeline(
-        prompt=req.prompt,
-        negative_prompt=req.negative_prompt,
-        seed=req.seed,
-        height=req.height,
-        width=req.width,
-        num_frames=req.num_frames,
-        frame_rate=req.frame_rate,
-        num_inference_steps=req.num_inference_steps,
-        video_guider_params=MultiModalGuiderParams(cfg_scale=req.video_cfg_scale),
-        audio_guider_params=MultiModalGuiderParams(cfg_scale=req.audio_cfg_scale),
-        images=images,
-        tiling_config=tiling_config,
-        enhance_prompt=req.enhance_prompt,
-        max_batch_size=req.max_batch_size,
-    )
+    if settings.pipeline_name == "DistilledPipeline":
+        video, audio = pipeline(
+            prompt=req.prompt,
+            seed=req.seed,
+            height=req.height,
+            width=req.width,
+            num_frames=req.num_frames,
+            frame_rate=req.frame_rate,
+            images=images,
+            tiling_config=tiling_config,
+            enhance_prompt=req.enhance_prompt,
+        )
+    else:
+        video, audio = pipeline(
+            prompt=req.prompt,
+            negative_prompt=req.negative_prompt,
+            seed=req.seed,
+            height=req.height,
+            width=req.width,
+            num_frames=req.num_frames,
+            frame_rate=req.frame_rate,
+            num_inference_steps=req.num_inference_steps,
+            video_guider_params=MultiModalGuiderParams(cfg_scale=req.video_cfg_scale),
+            audio_guider_params=MultiModalGuiderParams(cfg_scale=req.audio_cfg_scale),
+            images=images,
+            tiling_config=tiling_config,
+            enhance_prompt=req.enhance_prompt,
+            max_batch_size=req.max_batch_size,
+        )
 
     encode_video(
         video=video,
